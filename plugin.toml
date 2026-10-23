@@ -25,6 +25,6 @@ entry = "shortcut.luau"
 id        = "panel"
 entry     = "panel.luau"
 width     = 372
-height    = 420
+height    = 520
 placement = "attached"
 position  = "auto"

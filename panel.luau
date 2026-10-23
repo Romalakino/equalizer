@@ -1,9 +1,10 @@
 --!nonstrict
 -- panel.luau — эквалайзер: профили одним кликом.
 --
--- Данные: presets.json рядом (имена, подсказки, полосы). Применение —
--- eqctl (EasyEffects), состояние читаем оттуда же, поэтому панель и движок
--- не расходятся. Кривая сверху — АЧХ выбранного профиля.
+-- Данные: presets.json рядом (имена, подсказки, полосы и доп. эффекты).
+-- Применение — eqctl (EasyEffects), состояние читаем оттуда же, поэтому
+-- панель и движок не расходятся. Кривая сверху — АЧХ выбранного профиля;
+-- при смене профиля она плавно перетекает (onFrameTick), а не прыгает.
 
 local DIR = noctalia.pluginDir() or ""
 local STATE = noctalia.expandPath("~/.local/state/equalizer/state.json")
@@ -13,6 +14,30 @@ local active = "flat"     -- id профиля
 local bypass = false      -- эквалайзер в обходе
 local running = false     -- EasyEffects запущен
 local slots = {}          -- слот плитки -> id профиля
+
+local display = nil       -- текущая (анимируемая) кривая
+local anim = nil          -- { from, to, t, dur, fromCol, fromRow, toCol, toRow }
+local pulse = 0           -- 1 -> 0 во время перехода: подсветка
+local curveFor            -- объявим ниже; startAnim ссылается на неё
+local uiGen = 0           -- растёт на каждое действие пользователя
+local refreshSeq = 0      -- номер последнего запроса статуса
+local activeSlot = nil    -- слот текущего профиля
+local frameCol, frameRow = 0, 0 -- где сейчас «липкая рамка» (в координатах сетки)
+
+local function gridCol(slot) return (slot - 1) % 2 end
+local function gridRow(slot) return math.floor((slot - 1) / 2) end
+
+-- Разгон-торможение: рамка отрывается, ускоряется и мягко садится на цель.
+local function easeInOut(k)
+  if k < 0.5 then return 4 * k * k * k end
+  return 1 - ((-2 * k + 2) ^ 3) / 2
+end
+
+local FX_ORDER = { "bass_enhancer", "exciter", "deesser", "compressor", "stereo_tools", "limiter" }
+local FX_LABELS = {
+  bass_enhancer = "Bass", exciter = "Exciter", deesser = "De-ess",
+  compressor = "Comp", stereo_tools = "Stereo", limiter = "Limit",
+}
 
 -- ── данные ──────────────────────────────────────────────────────
 
@@ -35,15 +60,55 @@ end
 
 -- ── состояние ───────────────────────────────────────────────────
 
+local function frameTicks(on)
+  if panel and panel.setNeedsFrameTick then
+    pcall(panel.setNeedsFrameTick, on)
+  end
+end
+
+local function slotOf(id)
+  for i = 1, #slots do
+    if slots[i] == id then return i end
+  end
+  return nil
+end
+
+local function startAnim(id, slot)
+  local to = curveFor(id)
+  local from = display or curveFor("flat")
+  if #from ~= #to then from = to end
+
+  local target = slot or slotOf(id) or activeSlot or 1
+  local origin = activeSlot or target
+  anim = {
+    from = from, to = to, t = 0, dur = 0.42,
+    fromCol = gridCol(origin), fromRow = gridRow(origin),
+    toCol = gridCol(target), toRow = gridRow(target),
+  }
+  frameCol, frameRow = anim.fromCol, anim.fromRow
+  activeSlot = target
+  pulse = 1
+  frameTicks(true)
+end
+
 local function applyState(st)
   if type(st) ~= "table" then return end
-  if st.preset then active = st.preset end
+  if st.preset and st.preset ~= active then
+    active = st.preset
+    startAnim(active, slotOf(active))
+  end
   bypass = st.bypass == true
   running = st.running == true
 end
 
 local function refresh()
+  refreshSeq = refreshSeq + 1
+  local seq = refreshSeq
+  local gen = uiGen
   noctalia.runAsync({ DIR .. "/eqctl", "status" }, function(result)
+    -- Устаревший ответ не должен перебивать последний выбор: если за время
+    -- запроса был новый клик (gen) или новый запрос (seq) — молча выходим.
+    if seq ~= refreshSeq or gen ~= uiGen then return end
     if not result or result.exitCode ~= 0 then return end
     local ok, st = pcall(noctalia.json.decode, result.stdout or "")
     if ok then applyState(st) end
@@ -55,8 +120,8 @@ end
 
 local RANGE = 10 -- дБ вверх/вниз, столько рисуем
 
-local function curveValues()
-  local preset = presetById(active)
+curveFor = function(id)
+  local preset = presetById(id)
   local gains = (preset and preset.gains) or {}
   local n = #gains
   if n == 0 then return { 0.5, 0.5 } end
@@ -79,6 +144,19 @@ end
 
 -- ── вид ─────────────────────────────────────────────────────────
 
+local function chip(text, on)
+  return ui.column({
+    fill = on and "primary/0.10" or "on_surface/0.06",
+    radius = 6, paddingH = 7, paddingV = 2,
+  }, {
+    ui.label({
+      text = text, fontSize = 8.5,
+      color = on and "primary" or "on_surface/0.35",
+      maxLines = 1,
+    }),
+  })
+end
+
 local function graphCard()
   local preset = presetById(active)
   local on = not bypass
@@ -100,6 +178,12 @@ local function graphCard()
     ui.label({ text = "16 кГц", fontSize = 9, color = "on_surface/0.35" }),
   }
 
+  local chips = { chip("EQ", on) }
+  local fx = (preset and preset.effects) or {}
+  for _, key in ipairs(FX_ORDER) do
+    if fx[key] then chips[#chips + 1] = chip(FX_LABELS[key] or key, on) end
+  end
+
   return ui.column({
     fill = "surface_variant/0.35", radius = 14,
     border = "on_surface/0.10", borderWidth = 1,
@@ -107,13 +191,14 @@ local function graphCard()
   }, {
     ui.row({ gap = 8, align = "center" }, head),
     ui.graph({
-      values = curveValues(),
+      values = display or curveFor(active),
       height = 62,
       color = color,
-      fillOpacity = on and 0.16 or 0.05,
+      fillOpacity = (on and 0.16 or 0.05) + 0.10 * pulse,
       lineWidth = 2,
     }),
     ui.row({ gap = 0, align = "center" }, foot),
+    ui.row({ gap = 4, align = "center" }, chips),
   })
 end
 
@@ -123,24 +208,55 @@ local function tile(slot)
   if not preset then return ui.box({ width = 0, height = 0 }) end
 
   local selected = (id == active)
-  local dim = bypass and not selected
+  local moving = anim ~= nil
+
+  -- Насколько «липкая рамка» сейчас близка к этой плитке (0..1).
+  local w = 0
+  if moving then
+    local dx = gridCol(slot) - frameCol
+    local dy = gridRow(slot) - frameRow
+    local dist = math.sqrt(dx * dx + dy * dy)
+    w = math.max(0, math.min(1, 1 - dist / 1.15))
+    w = w ^ 1.6
+  end
+
+  local lit = selected and (not moving or w > 0.5)
+  local dim = bypass and not lit
 
   local head = {
     ui.label({
       text = preset.name, fontSize = 12.5, fontWeight = "semibold",
-      color = selected and "primary" or (dim and "on_surface/0.55" or "on_surface"),
+      color = lit and "primary" or (dim and "on_surface/0.55" or "on_surface"),
       maxLines = 1, flexGrow = 1,
     }),
   }
-  if selected then
+  if selected and (not moving or w > 0.55) then
     head[#head + 1] = ui.glyph({ name = "check", size = 12, color = "primary" })
+  end
+
+  -- Рамка едет по сетке: у прошлой плитки гаснет, у цели разгорается.
+  local fill, border, borderWidth
+  if moving then
+    if w > 0.02 then
+      fill = string.format("primary/%.2f", 0.05 + 0.10 * w)
+      border = string.format("primary/%.2f", 0.08 + 0.40 * w)
+      borderWidth = w > 0.45 and 2 or 1
+    else
+      fill = "surface_variant/0.40"
+      border = "on_surface/0.08"
+      borderWidth = 1
+    end
+  else
+    fill = selected and "primary/0.14" or "surface_variant/0.40"
+    border = selected and "primary/0.45" or "on_surface/0.08"
+    borderWidth = selected and 2 or 1
   end
 
   return ui.column({
     gap = 3, flexGrow = 1, minHeight = 54,
-    fill = selected and "primary/0.14" or "surface_variant/0.40",
-    border = selected and "primary/0.45" or "on_surface/0.08",
-    borderWidth = 1, radius = 12,
+    fill = fill,
+    border = border,
+    borderWidth = borderWidth, radius = 12,
     paddingH = 12, paddingV = 9,
     onClick = "onPick" .. slot,
   }, {
@@ -190,6 +306,35 @@ render = function()
   panel.render(ui.column({ gap = 0, flexGrow = 1 }, { header, ui.separator({}), body }))
 end
 
+-- ── анимация ────────────────────────────────────────────────────
+
+function onFrameTick(dt)
+  if not anim then return end
+  local ms = tonumber(dt) or 16
+  anim.t = anim.t + math.min(ms, 120) / 1000
+  local k = math.min(1, anim.t / anim.dur)
+  local e = 1 - (1 - k) ^ 3          -- кривая: мягко выезжает
+  local f = easeInOut(k)             -- рамка: разгон и торможение
+
+  local out = {}
+  for i = 1, #anim.to do
+    local a = anim.from[i] or anim.to[i]
+    out[i] = a + (anim.to[i] - a) * e
+  end
+  display = out
+  pulse = 1 - e
+  frameCol = anim.fromCol + (anim.toCol - anim.fromCol) * f
+  frameRow = anim.fromRow + (anim.toRow - anim.fromRow) * f
+
+  if k >= 1 then
+    frameCol, frameRow = anim.toCol, anim.toRow
+    anim = nil
+    pulse = 0
+    frameTicks(false)
+  end
+  render()
+end
+
 -- ── действия ────────────────────────────────────────────────────
 
 local function run(args)
@@ -202,13 +347,42 @@ local function run(args)
   end)
 end
 
+-- Применения сериализуем: два одновременных `easyeffects -l` дают гонку —
+-- state.json и звук достаются случайному из них. Если во время применения
+-- кликнули другой профиль, применим последний, а промежуточные пропустим.
+local applying = false
+local pending = nil
+
+local function applyPreset(id)
+  if applying then
+    pending = id
+    return
+  end
+  applying = true
+  noctalia.runAsync({ DIR .. "/eqctl", "apply", id }, function(result)
+    applying = false
+    if not result or result.exitCode ~= 0 then
+      noctalia.notifyError(noctalia.tr("panel.title"), noctalia.tr("error.apply"))
+    end
+    local nextId = pending
+    pending = nil
+    if nextId and nextId ~= id then
+      applyPreset(nextId)
+    else
+      refresh()
+    end
+  end)
+end
+
 local function pick(slot)
   local id = slots[slot]
   if not id then return end
+  uiGen = uiGen + 1
   active = id
   bypass = false
+  startAnim(id, slot)
   render()
-  run({ DIR .. "/eqctl", "apply", id })
+  applyPreset(id)
 end
 
 function onPick1() pick(1) end
@@ -217,12 +391,32 @@ function onPick3() pick(3) end
 function onPick4() pick(4) end
 function onPick5() pick(5) end
 function onPick6() pick(6) end
+function onPick7() pick(7) end
+function onPick8() pick(8) end
 
 function onEnabled(value)
   local checked = (value == "true")
+  uiGen = uiGen + 1
   bypass = not checked
   render()
   run({ DIR .. "/eqctl", "bypass", checked and "off" or "on" })
+end
+
+-- IPC для тестов и внешних хоткеев:
+--   noctalia msg plugin vlad-dev/equalizer:panel all pick 3
+function onIpc(event, payload)
+  if event ~= "pick" then return end
+  local n = tonumber(payload)
+  if n then
+    pick(n)
+    return
+  end
+  for i = 1, #slots do
+    if slots[i] == payload then
+      pick(i)
+      return
+    end
+  end
 end
 
 function onClosePanel() panel.close() end
@@ -231,8 +425,16 @@ function onClosePanel() panel.close() end
 
 function onOpen()
   loadData()
+  -- Вступление: кривая и рамка выезжают из «плоского» профиля.
+  display = curveFor("flat")
+  active = "flat"
+  activeSlot = 1
+  frameCol, frameRow = gridCol(1), gridRow(1)
   render()
   refresh()
 end
 
-function onClose() end
+function onClose()
+  anim = nil
+  pulse = 0
+end

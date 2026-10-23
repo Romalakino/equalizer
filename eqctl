@@ -44,6 +44,9 @@ data = json.load(open(src, encoding="utf-8"))
 bands = data["bands"]
 os.makedirs(outdir, exist_ok=True)
 
+# Порядок обработки: EQ → гармоники → де-эссер → компрессор → стерео → лимитер.
+FX_ORDER = ["bass_enhancer", "exciter", "deesser", "compressor", "stereo_tools", "limiter"]
+
 for preset in data["presets"]:
     bandmap = {}
     for i, freq in enumerate(bands):
@@ -70,6 +73,15 @@ for preset in data["presets"]:
             "plugins_order": ["equalizer"],
         }
     }
+    effects = preset.get("effects") or {}
+    for name in FX_ORDER:
+        params = effects.get(name)
+        if not params:
+            continue
+        block = {"bypass": False, "input-gain": 0.0, "output-gain": 0.0}
+        block.update(params)
+        doc["output"][name] = block
+        doc["output"]["plugins_order"].append(name)
     path = os.path.join(outdir, f"{prefix}{preset['id']}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
