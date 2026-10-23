@@ -30,7 +30,7 @@ sudo pacman -S easyeffects lsp-plugins python3
 ## Установка
 
 ```bash
-git clone <repo> ~/dev/noctalia-plugins/equalizer
+git clone https://github.com/Romalakino/equalizer ~/dev/noctalia-plugins/equalizer
 ```
 
 В `~/.local/state/noctalia/settings.toml`:
