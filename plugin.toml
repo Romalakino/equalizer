@@ -14,7 +14,7 @@ license     = "MIT"
 icon        = "adjustments-horizontal"
 description = "Системный эквалайзер с простыми профилями (бас, вокал, мягче верх) на EasyEffects."
 tags        = ["shortcut", "panel", "audio"]
-dependencies = ["easyeffects", "python3"]
+dependencies = ["easyeffects", "lsp-plugins", "python3"]
 
 # Плитка на главной Control Center
 [[shortcut]]
