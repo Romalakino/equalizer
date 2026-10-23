@@ -16,10 +16,15 @@ description = "Системный эквалайзер с простыми пр�
 tags        = ["shortcut", "panel", "audio"]
 dependencies = ["easyeffects", "lsp-plugins", "python3"]
 
-# Плитка на главной Control Center
+# Плитка на главной Control Center (вход в панель)
 [[shortcut]]
 id    = "eq"
 entry = "shortcut.luau"
+
+# Живое имя профиля в баре
+[[widget]]
+id    = "eq_widget"
+entry = "widget.luau"
 
 [[panel]]
 id        = "panel"
